@@ -30,10 +30,10 @@ const log_lib = require(process.env.LOG_LIB
   ? process.env.LOG_LIB
   : "node-color-log");
 const commands = ["all", "workspace", "users", "groups", "roles", "wipe"];
+let rolename = null;
 (async () => {
   try {
     var workspacename;
-    var rolename;
     var workspaceConfig;
 
     /*
@@ -69,7 +69,19 @@ const commands = ["all", "workspace", "users", "groups", "roles", "wipe"];
 
     // if workspace name is passed as second argument, then it will run Configurations for that workspace only. If not, for all workspaces found under config folder.
 
-    let selectedWorkspace = process.argv[3] ? process.argv[3] : "all";
+    let selectedWorkspace = "all";
+
+    // Handle 'roles' special case (command index 4)
+    if (command === 4) {
+      // Case: node configurator.js roles [rolename] [workspace]
+      if (process.argv[3]) rolename = process.argv[3];
+      if (process.argv[4]) selectedWorkspace = process.argv[4];
+      if (rolename) logInfo("Rolename: " + rolename);
+    } else {
+      // For all other commands
+      selectedWorkspace = process.argv[3] || "all";
+    }
+
     logInfo("Selected Workspace: " + selectedWorkspace);
     //config  directory is either hard coded to ./config or passed in env variable.
     let configDir = "./config/";
@@ -502,37 +514,57 @@ async function applyRbac(
   logInfo("Applying roles now for workspace " + workspacename);
 
   if (!isNew && delete_existing_roles) {
-    // existing workspace but not default.. delete the current role.
-    logWarn(
-      "Deleting current roles. If you do not want this set FEATURE_DELETE_EXISTING_ROLES to false and run again. Execution will pause for few seconds to allow stop. Kong strongly recommends not to delete existing roles in 'default' workspace using this tool"
-    );
-    await new Promise((resolve) => setTimeout(resolve, 8000));
-    if (workspacename == "default") {
+    const isDefaultWorkspace = workspacename === "default";
+    if (isDefaultWorkspace) {
       logError(
         "Kong strongly recommends not to delete existing roles in 'default' using this tool"
       );
       process.exit(2);
     }
-    var currentRoles = await axios.get(
-      kongaddr + "/" + workspacename + rbacEndpoint + rolesEndpoint,
-      headers
-    );
-    for (var oldRole of currentRoles.data.data) {
-      res = await axios.delete(
-        kongaddr +
-          "/" +
-          workspacename +
-          rbacEndpoint +
-          rolesEndpoint +
-          "/" +
-          oldRole.name,
-        headers
+    if (rolename) {
+      logWarn(
+        `Deleting only the role '${rolename}' from workspace '${workspacename}'.`
       );
+      try {
+        await axios.delete(
+          `${kongaddr}/${workspacename}${rbacEndpoint}${rolesEndpoint}/${rolename}`,
+          headers
+        );
+        logInfo(`Deleted role '${rolename}' successfully.`);
+      } catch (error) {
+        const msg = error.response?.data?.message || error.message;
+        logError(`Failed to delete role '${rolename}': ${msg}`);
+      }
+    } else {
+      logWarn(
+        "Deleting current roles. If you do not want this set FEATURE_DELETE_EXISTING_ROLES to false and run again. Execution will pause for few seconds to allow stop. Kong strongly recommends not to delete existing roles in 'default' workspace using this tool"
+      );
+      await new Promise((resolve) => setTimeout(resolve, 8000));
+      try {
+        const response = await axios.get(
+          `${kongaddr}/${workspacename}${rbacEndpoint}${rolesEndpoint}`,
+          headers
+        );
+        const currentRoles = response.data?.data || [];
+        for (const oldRole of currentRoles) {
+          await axios.delete(
+            `${kongaddr}/${workspacename}${rbacEndpoint}${rolesEndpoint}/${oldRole.name}`,
+            headers
+          );
+          logInfo(`Deleted role '${oldRole.name}' successfully.`);
+        }
+      } catch (error) {
+        const msg = error.response?.data?.message || error.message;
+        logError(`Failed to fetch or delete roles: ${msg}`);
+      }
     }
   }
-
   try {
     for (var roleDetail of rbac) {
+      // If rolename is passed as argument, skip roles not matching it
+      if (rolename && roleDetail.role !== rolename) {
+        continue;
+      }
       var roledata = {
         name: roleDetail.role,
       };
@@ -585,8 +617,11 @@ async function applyRbac(
       }
     }
     logInfo(
-      "all roles and permissions successfully applied for the workspace " +
-        workspacename
+      (rolename
+        ? `Role '${rolename}' and its permissions successfully applied`
+        : "All roles and permissions successfully applied") +
+      " for the workspace " +
+      workspacename
     );
   } catch (e) {
     if (e.response.status == 409) {
